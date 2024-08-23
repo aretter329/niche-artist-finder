@@ -143,7 +143,9 @@ const updateTimePeriod = (period) => {
       
 function tryLogin() {
   const clientId = '650edf944c264da5aa11c5f94b19db12';
-  const redirectUri = 'http://localhost:5173/';
+  const redirectUri = process.env.NODE_ENV === 'production'
+    ? 'https://aretter329.github.io/niche-artist-finder/'
+    : 'http://localhost:5173/';
   const scopes = 'user-read-private user-read-email user-top-read';
   const url = `https://accounts.spotify.com/authorize?response_type=token&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scopes)}`;
   window.location.href = url;

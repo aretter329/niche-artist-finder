@@ -414,7 +414,7 @@ onMounted(async () => {
 }
 
 .spotify-login-button {
-  background: var(--spotify-green); 
+  background: rgba(0, 0, 0, 0.7); 
   border: none;
   color: white;
   padding: 15px 30px;
@@ -423,7 +423,7 @@ onMounted(async () => {
   text-transform: uppercase;
   border-radius: 30px;
   cursor: pointer;
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 8px rgb(255, 255, 255, .3);
 }
 
 .spotify-login-button:hover {

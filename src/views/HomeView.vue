@@ -71,7 +71,7 @@
 
       <h3>Average popularity: {{ avgPopularity }}</h3>
           
-      <button class="nav-button" @click="fetchRelatedArtistsForArtists(); artistView=false">Fetch rec artists</button>
+      <button class="nav-button" @click="fetchRelatedArtistsForArtists(); artistView=false">Get Recommendations</button>
      </div>
       <div v-else class="recs">
         <h2>Recommendations</h2>
@@ -80,16 +80,28 @@
             <tr>
               <th>Artist</th>
               <th>Popularity</th>
+              <th>Preview</th> 
             </tr>
           </thead>
           <tbody>
             <tr v-for="rec in recArtists" :key="rec.id">
               <td>{{ rec.name }}</td>
               <td>{{ rec.popularity }}</td>
+              <td>
+                <div v-if="rec.topTrack && rec.topTrack.previewUrl" class="audio-player">
+                  <audio ref="audio" :src="rec.topTrack.previewUrl"></audio>
+                  <button class="play-pause-button" @click="togglePlayPause">▶</button>
+                  <a target="_blank" :href=rec.topTrack.url>{{ rec.topTrack.name }}</a>
+                </div>
+                <span v-else>No preview available</span>
+              </td>
             </tr>
           </tbody>
         </table>
-        <button class="nav-button" @click="artistView=true">Back to artists</button>
+        <div> 
+        <button class="nav-button" @click="artistView=true">Back</button>
+        <button class="nav-button" @click="refreshRecommendations">Refresh</button>
+          </div>
       </div>
     </div>
 </div>
@@ -107,7 +119,6 @@ const timePeriodLabels = ['Past Year', 'Past 6 Months', 'Past Month'];
 const selectedTimePeriod = ref('short_term');
 const topType = ref('artists');
 const recommendations = ref([]);
-const selectedNumTracks = ref(50);
 const recommendedTracks = ref([]);
 const artistData = ref({});
 const loading = ref(true);
@@ -140,13 +151,49 @@ const nicheArtists = computed(() => {
 const updateTimePeriod = (period) => {
   selectedTimePeriod.value = period;
 };
+
+const refreshRecommendations = async () => {
+  if (recArtists.value.length === 0) {
+    console.log('No artists to refresh from.');
+    return;
+  }
+
+  loading.value = true;
+  // Flatten the list of recommended artists to use as base for new recommendations
+  const artistIds = recArtists.value.map(artist => artist.id);
+  
+  const newArtists = [];
+  for (const artistId of artistIds) {
+    const newArtist = await fetchSingleRelatedArtistUntilThreshold(artistId);
+    if (newArtist) {
+      newArtists.push(newArtist);
+    }
+  }
+  
+  // Update the recArtists
+  recArtists.value = newArtists;
+  loading.value = false;
+};
       
+function togglePlayPause(event) {
+  const button = event.target;
+  const audioElement = button.previousElementSibling;
+
+  if (audioElement.paused) {
+    audioElement.play();
+    button.textContent = '▐▐';
+  } else {
+    audioElement.pause();
+    button.textContent = '▶';
+  }
+}
+
 function tryLogin() {
   const clientId = '650edf944c264da5aa11c5f94b19db12';
   const redirectUri = process.env.NODE_ENV === 'production'
     ? 'https://aretter329.github.io/niche-artist-finder/'
     : 'http://localhost:5173/';
-  const scopes = 'user-read-private user-read-email user-top-read';
+  const scopes = 'user-top-read';
   const url = `https://accounts.spotify.com/authorize?response_type=token&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scopes)}`;
   window.location.href = url;
 }
@@ -165,33 +212,12 @@ function buildUrl(base, params) {
   return `${base}?${query}`;
 }
 
-async function fetchUserData(accessToken) {
-  try {
-    const response = await fetch('https://api.spotify.com/v1/me/', {
-      headers: {
-        Authorization: `Bearer ${accessToken}`
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    const data = await response.json();
-    userGreeting.value = `Hello, ${data.display_name}!`;
-    isLoggedIn.value = true;
-
-  } catch (error) {
-    console.error('Error fetching user data:', error);
-  }
-}
-
 async function fetchTopArtists(accessToken) {
   if (accessToken) {
     try {
       const params = {
           time_range: selectedTimePeriod.value,
-          limit: selectedNumTracks.value
+          limit: 10
         };
       const baseUrl = `https://api.spotify.com/v1/me/top/artists`;
       const url = buildUrl(baseUrl, params);
@@ -212,6 +238,7 @@ async function fetchTopArtists(accessToken) {
         popularity: item.popularity,
         id: item.id
       }));
+      isLoggedIn.value = true;
     }  
 
      catch (error) {
@@ -222,140 +249,159 @@ async function fetchTopArtists(accessToken) {
   }
 }
 
-async function fetchRelatedArtistsForArtists() {
+async function fetchSingleRelatedArtistUntilThreshold(artistId) {
   const hashParams = getHashParams();
   const accessToken = hashParams.access_token;
 
   if (!accessToken) {
     console.error('Access token is missing.');
-    return;
+    return null;
   }
 
-  try {
-    let allArtists = topArtists.value;
-    let leastPopularArtists = [];
-    const popularityThreshold = 80; // Popularity threshold for filtering artists
-    const batchSize = 50;
-    let offset = 0;
+  const popularityThreshold = 50; // Popularity threshold for filtering artists
+  const maxAttempts = 5; // Max number of attempts to avoid infinite loops
+  let attempts = 0;
+  let leastPopularArtist = null; // Track the least popular artist found so far
 
-    // Start with the least popular artists from the initial list
-    leastPopularArtists = allArtists
-      .sort((a, b) => a.popularity - b.popularity)
-      .slice(0, 10);
-
-
-    console.log('HERE');
-    let finalArtists = [];
-
-    while (finalArtists.length < 10) {
-      // Fetch related artists for the current least popular artists
-      const relatedArtistsPromises = leastPopularArtists.map(async (artist) => {
-        const relatedResponse = await fetch(`https://api.spotify.com/v1/artists/${artist.id}/related-artists`, {
-          headers: {
-            Authorization: `Bearer ${accessToken}`
-          }
-        });
-
-        if (!relatedResponse.ok) {
-          throw new Error(`HTTP error! status: ${relatedResponse.status}`);
-        }
-
-        const relatedData = await relatedResponse.json();
-        return relatedData.artists.map(relatedArtist => ({
-          name: relatedArtist.name,
-          id: relatedArtist.id,
-          popularity: relatedArtist.popularity
-        }));
-      });
-
-      const relatedArtistsResults = await Promise.all(relatedArtistsPromises);
-      let relatedArtists = relatedArtistsResults.flat();
-
-      // Add related artists to the allArtists list and re-sort
-      allArtists = [...allArtists, ...relatedArtists];
-      allArtists.sort((a, b) => a.popularity - b.popularity);
-
-      // Update leastPopularArtists from allArtists
-      leastPopularArtists = allArtists
-        .sort((a, b) => a.popularity - b.popularity)
-        .slice(0, 10);
-
-      // Update finalArtists with those meeting the popularity criteria
-      finalArtists = leastPopularArtists
-        .filter(artist => artist.popularity < popularityThreshold)
-        .sort((a, b) => a.popularity - b.popularity)
-        .slice(0, 10);
-
-      // If no new related artists or if unable to populate the list further, break the loop
-      if (relatedArtists.length === 0) {
-        break;
-      }
-    }
-
-    // If still not enough artists, fallback to the initial least popular artists within the threshold
-    if (finalArtists.length < 10) {
-      finalArtists = leastPopularArtists
-        .filter(artist => artist.popularity < popularityThreshold);
-    }
-
-    // Set recommendations with the final list of artists
-    recArtists.value = finalArtists;
-
-  } catch (error) {
-    console.error('Error fetching related artists:', error);
-  }
-}
-
-/* async function fetchRecommendations() {
-  const hashParams = getHashParams();
-  const accessToken = hashParams.access_token;
-
-  if (accessToken) {
+  while (attempts < maxAttempts) {
     try {
-      const maxPopularity = 30; 
-      const response = await fetch(`https://api.spotify.com/v1/recommendations?seed_artists=${seedArtists.value}&seed_tracks=${seedTracks.value}&max_popularity=${maxPopularity}`, {
+      // Fetch related artists for the current artistId
+      const relatedResponse = await fetch(`https://api.spotify.com/v1/artists/${artistId}/related-artists`, {
         headers: {
           Authorization: `Bearer ${accessToken}`
         }
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (!relatedResponse.ok) {
+        throw new Error(`HTTP error! status: ${relatedResponse.status}`);
       }
 
-      const data = await response.json();
+      const relatedData = await relatedResponse.json();
+      const allRelatedArtists = relatedData.artists.map(artist => ({
+        name: artist.name,
+        id: artist.id,
+        popularity: artist.popularity
+      }));
 
-      const artistDetailsPromises = data.tracks.map(async track => {
-        const artistId = track.artists[0].id; // Assuming there's only one artist per track
-        const artistResponse = await fetch(`https://api.spotify.com/v1/artists/${artistId}`, {
-          headers: {
-            Authorization: `Bearer ${accessToken}`
-          }
-        });
-        
-        if (!artistResponse.ok) {
-          throw new Error(`HTTP error fetching artist details! status: ${artistResponse.status}`);
-        }
+      // Update the least popular artist found so far
+      if (allRelatedArtists.length > 0) {
+        leastPopularArtist = allRelatedArtists.reduce((least, artist) => 
+          !least || artist.popularity < least.popularity ? artist : least, 
+          leastPopularArtist
+        );
+      }
 
-        const artistData = await artistResponse.json();
+      // Filter related artists based on the popularity threshold
+      const filteredArtists = allRelatedArtists.filter(artist => artist.popularity < popularityThreshold);
+
+      if (filteredArtists.length > 0) {
+        // Select a random artist from the filtered list
+        const randomArtist = filteredArtists[Math.floor(Math.random() * filteredArtists.length)];
+        const trackInfo = await fetchMostPopularPlayableTrack(randomArtist.id);
+
         return {
-          name: track.name,
-          artist: track.artists[0].name,
-          album: track.album.name,
-          id: track.id,
-          popularity: track.popularity,
-          artistPopularity: artistData.popularity // Include artist's popularity
+          ...randomArtist,
+          topTrack: trackInfo
         };
-      });
+      }
 
-      recommendations.value = await Promise.all(artistDetailsPromises);
+      // Update artistId to the least popular artist in the current batch for the next iteration
+      if (allRelatedArtists.length > 0) {
+        artistId = allRelatedArtists.sort((a, b) => a.popularity - b.popularity)[0].id;
+      } else {
+        console.log('No more artists to use for the search.');
+        break;
+      }
 
+      attempts++;
     } catch (error) {
-      console.error('Error fetching recommendations:', error);
+      console.error('Error fetching related artists:', error);
+      break; // Exit on error to avoid endless loop
     }
   }
+
+  // Return the least popular artist found so far, even if it's not below the threshold
+  if (leastPopularArtist) {
+    const trackInfo = await fetchMostPopularPlayableTrack(leastPopularArtist.id);
+    return {
+      ...leastPopularArtist,
+      topTrack: trackInfo
+    };
+  } else {
+    console.error('No artists found after maximum attempts.');
+    return null; // Or handle this case appropriately based on your needs
+  }
 }
-*/
+
+
+ async function fetchMostPopularPlayableTrack(artistId) {
+  const hashParams = getHashParams();
+  const accessToken = hashParams.access_token;
+
+  if (!accessToken) {
+    console.error('Access token is missing.');
+    return null;
+  }
+
+  try {
+    const topTracksResponse = await fetch(`https://api.spotify.com/v1/artists/${artistId}/top-tracks?market=US`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    });
+
+    if (!topTracksResponse.ok) {
+      throw new Error(`HTTP error! status: ${topTracksResponse.status}`);
+    }
+
+    const topTracksData = await topTracksResponse.json();
+    const topTracks = topTracksData.tracks;
+
+    // Find a playable track
+    const mostPopularPlayableTrack = topTracks
+      .filter(track => track.is_playable)[0]; 
+
+    if (mostPopularPlayableTrack) {
+      return {
+        name: mostPopularPlayableTrack.name,
+        previewUrl: mostPopularPlayableTrack.preview_url,
+        album: mostPopularPlayableTrack.album.name,
+        artists: mostPopularPlayableTrack.artists.map(artist => artist.name).join(', '),
+        popularity: mostPopularPlayableTrack.popularity,
+        url: mostPopularPlayableTrack.external_urls.spotify
+      };
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error fetching top tracks:', error);
+    return null;
+  }
+}
+
+
+ async function fetchRelatedArtistsForArtists() {
+  try {
+    recArtists.value = []; // Initialize the recArtists array
+    loading.value = true;
+
+    // Fetch single related artist for each artist in topArtists
+    const fetchPromises = topArtists.value.map(artist =>
+      fetchSingleRelatedArtistUntilThreshold(artist.id),
+    );
+
+    // Wait for all fetch operations to complete
+    const relatedArtistsResults = await Promise.all(fetchPromises);
+
+    // Filter out any null results (in case no artist was found below the threshold)
+    recArtists.value = relatedArtistsResults.filter(artist => artist !== null);
+    loading.value = false;
+
+  } catch (error) {
+    console.error('Error updating recommendations:', error);
+  }
+}
+
 watch(selectedTimePeriod, async (newTimePeriod) => {
   const hashParams = getHashParams();
   const accessToken = hashParams.access_token;
@@ -380,7 +426,6 @@ onMounted(async () => {
 
   if (accessToken) {
     try {
-      await fetchUserData(accessToken);
       await fetchTopArtists(accessToken);
     } catch (error) {
       console.error('Error during data fetching:', error);
@@ -392,12 +437,37 @@ onMounted(async () => {
   }
   
 });
-
-
 </script>
 
 <style scoped>
+.audio-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 
+.audio-player audio {
+  display: none; /* Hide the default audio controls */
+}
+
+.play-pause-button {
+  background: transparent;
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  font-size: 20px;
+  cursor: pointer;
+  outline: none;
+  text-align: center;
+}
+
+.play-pause-button:hover {
+  color: gray;
+  cursor: pointer;
+  
+}
 
 .login-container {
   display: flex;
@@ -477,6 +547,9 @@ th, td{
     }
 }
 
+a{
+  color: white;
+}
 .background {
     position: fixed;
     width: 100vw;
@@ -509,6 +582,7 @@ th, td{
   background: rgba(0, 0, 0, 0.7); /* Black background with 70% opacity */
   color: white; /* Text color */
   width: 70%; /* Width of the container */
+  max-width: 400px;
   padding: 20px; /* Optional: Adds padding inside the container */
   box-sizing: border-box; /* Includes padding and border in the element's total width and height */
   border-radius: 8px; /* Optional: Rounds the corners of the container */
@@ -533,6 +607,8 @@ th, td{
   cursor: pointer;
   border-radius: 4px;
   transition: color 0.3s, border-color 0.3s;
+  padding: 5px;
+  margin: 5px;
 }
 
 .nav-button:hover {
